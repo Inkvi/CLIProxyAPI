@@ -3,7 +3,64 @@
 Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with OAuth and round-robin load balancing.
 
 ## Repository
-- GitHub: https://github.com/router-for-me/CLIProxyAPI
+- This checkout is a personal fork, not the upstream project.
+  - `origin`: https://github.com/Inkvi/CLIProxyAPI (push here)
+  - `upstream`: https://github.com/router-for-me/CLIProxyAPI (never push here)
+- Working branch: `soft-quota-threshold`, rebased on the latest upstream release tag.
+
+## Fork Changes
+- Soft quota threshold (`sdk/cliproxy/auth/soft_quota.go`, hooked into `MarkResult` in `conductor_cooldown.go`):
+  - `routing.soft-quota-threshold` (config, 0 disables): pauses a Claude or Codex credential that can bill paid overage (Claude `Overage-Status: allowed`, Codex credits available or unlimited) once its 5h/7d or primary/secondary usage reaches the threshold, until the window resets.
+  - `soft_quota_threshold` (auth JSON field): per-credential override that applies even without paid overage.
+  - Reuses the existing `credential_quota` cooldown, so the selector and scheduler skip the credential. The pause is in memory only; a restart clears it, and the next response re-applies it.
+- Keep fork changes small and isolated so rebasing onto new upstream releases stays easy.
+
+## Syncing With Upstream
+```bash
+git fetch upstream --tags
+git rebase <new-release-tag>          # e.g. v8.0.48
+go test ./sdk/cliproxy/auth/ ./internal/config/
+git push --force-with-lease origin soft-quota-threshold
+```
+Then deploy (below).
+
+Some upstream tests already fail on a clean upstream checkout (timing-sensitive): `TestDevinApplyPatchRejectionCarriesLogDiagnostic`, `TestPionMediaRelayBridgesAudioAndDataChannel`, and occasionally `sdk/cliproxy` plugin staging and Codex websocket keepalive tests. Before blaming a change, run the same test on the release tag with `git stash`.
+
+## Local Deployment (this machine)
+The proxy that runs on this Mac is built from this checkout. There is no Homebrew install; do not `brew install cliproxyapi`, since it would fight over port 8317.
+
+| What | Where |
+|---|---|
+| Binary | `bin/cliproxyapi` (gitignored), linked from `~/.local/bin/cliproxyapi` |
+| Service | launchd agent `com.inkvi.cliproxyapi` (`~/Library/LaunchAgents/com.inkvi.cliproxyapi.plist`), starts at login, restarts on crash |
+| Config | `~/.cli-proxy-api/config.yaml` (contains keys: never commit it or copy it into the repo) |
+| Accounts | `~/.cli-proxy-api/*.json` |
+| Logs | `~/Library/Logs/cliproxyapi.log` |
+| Listens on | `127.0.0.1:8317` |
+
+Deploy after changing code:
+```bash
+gofmt -w <changed files>
+go test ./sdk/cliproxy/auth/ ./internal/config/   # plus packages you touched
+go build -buildvcs=false -ldflags="-s -w \
+  -X 'main.Version=$(git describe --tags --abbrev=0 | sed 's/^v//')-fork' \
+  -X 'main.Commit=$(git rev-parse --short HEAD)' \
+  -X 'main.BuildDate=$(date -u +%FT%TZ)' \
+  -X 'main.DefaultConfigPath=$HOME/.cli-proxy-api/config.yaml'" \
+  -o bin/cliproxyapi ./cmd/server
+launchctl kickstart -k gui/$(id -u)/com.inkvi.cliproxyapi
+```
+- `DefaultConfigPath` lets `cliproxyapi -claude-login` / `-codex-login` work without `-config`.
+- Commit before building so the embedded commit hash means something.
+
+Verify:
+```bash
+bin/cliproxyapi --help 2>&1 | head -1                # Commit should equal: git rev-parse --short HEAD
+launchctl print gui/$(id -u)/com.inkvi.cliproxyapi | grep -E '^\s*(state|program) ='
+tail -n 20 ~/Library/Logs/cliproxyapi.log
+```
+
+No restart is needed for edits to `config.yaml` or account files; the proxy reloads them on its own.
 
 ## Commands
 ```bash
