@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -233,5 +234,89 @@ func TestMarkResultSoftQuotaPausesCredentialAndSelectorSkipsIt(t *testing.T) {
 		if picked.ID != personal.ID {
 			t.Fatalf("Pick() = %s, want %s", picked.ID, personal.ID)
 		}
+	}
+}
+
+func TestCanBillPaidOverage(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		signals  map[string]string
+		want     bool
+	}{
+		{name: "claude overage allowed", provider: "claude", signals: map[string]string{"Anthropic-Ratelimit-Unified-Overage-Status": "allowed"}, want: true},
+		{name: "claude overage allowed warning", provider: "claude", signals: map[string]string{"Anthropic-Ratelimit-Unified-Overage-Status": "allowed_warning"}, want: true},
+		{name: "claude overage rejected", provider: "claude", signals: map[string]string{"Anthropic-Ratelimit-Unified-Overage-Status": "rejected"}},
+		{name: "claude no overage signal", provider: "claude", signals: map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"}},
+		{name: "codex has credits", provider: "codex", signals: map[string]string{"X-Codex-Credits-Has-Credits": "True"}, want: true},
+		{name: "codex unlimited credits", provider: "codex", signals: map[string]string{"X-Codex-Credits-Has-Credits": "False", "X-Codex-Credits-Unlimited": "True"}, want: true},
+		{name: "codex no credits", provider: "codex", signals: map[string]string{"X-Codex-Credits-Has-Credits": "False", "X-Codex-Credits-Unlimited": "False"}},
+		{name: "other provider", provider: "gemini", signals: map[string]string{"X-Codex-Credits-Has-Credits": "True"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canBillPaidOverage(tt.provider, tt.signals); got != tt.want {
+				t.Fatalf("canBillPaidOverage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveSoftQuotaThreshold(t *testing.T) {
+	withOverage := map[string]string{"Anthropic-Ratelimit-Unified-Overage-Status": "allowed"}
+	withoutOverage := map[string]string{"Anthropic-Ratelimit-Unified-Overage-Status": "rejected"}
+	tests := []struct {
+		name   string
+		auth   *Auth
+		global float64
+		want   float64
+	}{
+		{name: "global applies when overage can bill", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withOverage}}, global: 0.95, want: 0.95},
+		{name: "global skipped without overage", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withoutOverage}}, global: 0.95},
+		{name: "global disabled", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withOverage}}},
+		{name: "invalid global ignored", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withOverage}}, global: 95},
+		{name: "auth file value wins without overage", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withoutOverage}, Metadata: map[string]any{SoftQuotaThresholdMetadataKey: 0.8}}, global: 0.95, want: 0.8},
+		{name: "auth file value wins over global", auth: &Auth{Provider: "claude", Quota: QuotaState{Signals: withOverage}, Metadata: map[string]any{SoftQuotaThresholdMetadataKey: 0.99}}, global: 0.95, want: 0.99},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveSoftQuotaThreshold(tt.auth, tt.global); got != tt.want {
+				t.Fatalf("effectiveSoftQuotaThreshold() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMarkResultGlobalSoftQuotaOnlyPausesOverageCredentials(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{SoftQuotaThreshold: 0.95}})
+	for _, id := range []string{"codex-business", "codex-personal"} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", id, errRegister)
+		}
+	}
+
+	reset := time.Now().Add(48 * time.Hour).Truncate(time.Second)
+	markSuccess := func(authID, hasCredits string) {
+		ctx := internallogging.WithResponseHeadersHolder(context.Background())
+		internallogging.SetResponseHeaders(ctx, http.Header{
+			"X-Codex-Primary-Used-Percent": []string{"97"},
+			"X-Codex-Primary-Reset-At":     []string{strconv.FormatInt(reset.Unix(), 10)},
+			"X-Codex-Credits-Has-Credits":  []string{hasCredits},
+			"X-Codex-Credits-Unlimited":    []string{"False"},
+		})
+		manager.MarkResult(ctx, Result{AuthID: authID, Provider: "codex", Model: "gpt-6-astra", Success: true})
+	}
+
+	markSuccess("codex-business", "True")
+	markSuccess("codex-personal", "False")
+
+	business, _ := manager.GetByID("codex-business")
+	if !business.Quota.Exceeded || business.Quota.Reason != "credential_quota" || !business.Quota.NextRecoverAt.Equal(reset) {
+		t.Fatalf("credential with credits was not paused: %#v", business.Quota)
+	}
+	personal, _ := manager.GetByID("codex-personal")
+	if personal.Quota.Exceeded {
+		t.Fatalf("credential without credits was paused: %#v", personal.Quota)
 	}
 }

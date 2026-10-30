@@ -601,6 +601,13 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SoftQuotaThreshold pauses a Claude or Codex credential that can bill paid overage
+	// (Claude extra usage, Codex credits) once its observed plan usage reaches this
+	// fraction, until the usage window resets. Such credentials never return 429 at
+	// the plan limit, so without this they keep serving requests into billed overage.
+	// 0 (default) disables. Example: 0.95.
+	SoftQuotaThreshold float64 `yaml:"soft-quota-threshold,omitempty" json:"soft-quota-threshold,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
