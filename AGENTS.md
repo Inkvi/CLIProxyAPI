@@ -13,6 +13,10 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
   - `routing.soft-quota-threshold` (config, 0 disables): pauses a Claude or Codex credential that can bill paid overage (Claude `Overage-Status: allowed`, Codex credits available or unlimited) once its 5h/7d or primary/secondary usage reaches the threshold, until the window resets.
   - `soft_quota_threshold` (auth JSON field): per-credential override that applies even without paid overage.
   - Reuses the existing `credential_quota` cooldown, so the selector and scheduler skip the credential. The pause is in memory only; a restart clears it, and the next response re-applies it.
+- Soonest-reset routing (`sdk/cliproxy/auth/soonest_reset.go`):
+  - `routing.strategy: soonest-reset` picks the available credential whose weekly window resets soonest (Claude `7d` reset, Codex secondary reset), so quota that would expire unused is spent first.
+  - Credentials with no known future reset (new, after a restart, or after their window rolled over) are picked first so their reset gets learned. Ties keep ID order.
+  - Treated as a custom selector, so the scheduler fast path is skipped and every pick goes through `Pick`. Works with session affinity as its fallback.
 - Keep fork changes small and isolated so rebasing onto new upstream releases stays easy.
 
 ## Syncing With Upstream
