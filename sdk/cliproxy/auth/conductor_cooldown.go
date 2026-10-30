@@ -1364,7 +1364,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			}
 			if observed {
-				if recoverAt, paused := applySoftQuota(auth, now); paused {
+				var globalSoftQuota float64
+				if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil {
+					globalSoftQuota = cfg.Routing.SoftQuotaThreshold
+				}
+				if recoverAt, paused := applySoftQuota(auth, globalSoftQuota, now); paused {
 					logEntryWithRequestID(ctx).Infof("auth %s reached its soft quota threshold, pausing until %s", auth.ID, recoverAt.Format(time.RFC3339))
 				}
 			}

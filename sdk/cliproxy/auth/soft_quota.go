@@ -7,9 +7,9 @@ import (
 )
 
 // SoftQuotaThresholdMetadataKey is the auth file field that pauses a credential
-// once its observed plan usage reaches the given fraction (for example 0.95).
-// It lets a credential with paid overage enabled step aside before the plan
-// limit is exhausted, since such credentials never return 429 at the limit.
+// once its observed plan usage reaches the given fraction (for example 0.95),
+// whether or not the credential can bill paid overage. It overrides the global
+// routing.soft-quota-threshold for that credential.
 const SoftQuotaThresholdMetadataKey = "soft_quota_threshold"
 
 // softQuotaFallbackPause is used when the upstream response carries no usable reset time.
@@ -33,10 +33,47 @@ func authSoftQuotaThreshold(auth *Auth) float64 {
 	default:
 		return 0
 	}
+	return validSoftQuotaThreshold(threshold)
+}
+
+func validSoftQuotaThreshold(threshold float64) float64 {
 	if threshold <= 0 || threshold > 1 {
 		return 0
 	}
 	return threshold
+}
+
+// effectiveSoftQuotaThreshold returns the threshold for a credential: its own
+// auth file value if set, otherwise the global threshold when the latest
+// response shows the credential can bill paid overage. 0 means never pause.
+func effectiveSoftQuotaThreshold(auth *Auth, globalThreshold float64) float64 {
+	if threshold := authSoftQuotaThreshold(auth); threshold > 0 {
+		return threshold
+	}
+	globalThreshold = validSoftQuotaThreshold(globalThreshold)
+	if globalThreshold == 0 || auth == nil || !canBillPaidOverage(auth.Provider, auth.Quota.Signals) {
+		return 0
+	}
+	return globalThreshold
+}
+
+// canBillPaidOverage reports whether the quota signals show the credential keeps
+// working past its plan limit by billing paid usage: Claude extra usage or
+// Codex credits.
+func canBillPaidOverage(provider string, signals map[string]string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		status := strings.ToLower(strings.TrimSpace(signals["Anthropic-Ratelimit-Unified-Overage-Status"]))
+		return strings.HasPrefix(status, "allowed")
+	case "codex":
+		return signalTrue(signals["X-Codex-Credits-Has-Credits"]) || signalTrue(signals["X-Codex-Credits-Unlimited"])
+	default:
+		return false
+	}
+}
+
+func signalTrue(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), "true")
 }
 
 // softQuotaRecoverAt reports whether the observed quota signals crossed the
@@ -63,7 +100,7 @@ func softQuotaRecoverAt(provider string, signals map[string]string, threshold fl
 			}
 		}
 		// Overage in use means the plan limit is already exhausted.
-		if strings.EqualFold(strings.TrimSpace(signals["Anthropic-Ratelimit-Unified-Overage-In-Use"]), "true") {
+		if signalTrue(signals["Anthropic-Ratelimit-Unified-Overage-In-Use"]) {
 			cross(parseSignalUnix(signals["Anthropic-Ratelimit-Unified-Reset"]))
 		}
 	case "codex":
@@ -95,11 +132,11 @@ func softQuotaRecoverAt(provider string, signals map[string]string, threshold fl
 }
 
 // applySoftQuota pauses the credential until recovery when its latest quota
-// snapshot crossed the configured threshold. It reuses the credential-wide
+// snapshot crossed its effective threshold. It reuses the credential-wide
 // quota cooldown, which the selector and scheduler already skip and which a
 // later success does not clear.
-func applySoftQuota(auth *Auth, now time.Time) (time.Time, bool) {
-	threshold := authSoftQuotaThreshold(auth)
+func applySoftQuota(auth *Auth, globalThreshold float64, now time.Time) (time.Time, bool) {
+	threshold := effectiveSoftQuotaThreshold(auth, globalThreshold)
 	if threshold == 0 {
 		return time.Time{}, false
 	}

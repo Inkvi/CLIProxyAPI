@@ -194,6 +194,14 @@ routing:
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
 
+  # Pause a Claude or Codex credential that can bill paid overage (Claude extra usage,
+  # Codex credits) once its plan usage reaches this fraction, until the usage window
+  # resets. Such credentials never return 429 at the plan limit, so without this they
+  # keep serving requests into billed overage. Usage comes from the latest upstream
+  # response headers. A credential's auth JSON may set "soft_quota_threshold" to apply
+  # its own threshold regardless of overage. 0 (default) disables.
+  soft-quota-threshold: 0
+
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 
