@@ -363,6 +363,14 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 func authPriority(auth *Auth) int {
+	priority := configuredAuthPriority(auth)
+	if priority < 0 && isPromotedBeforeReset(auth, time.Now()) {
+		return 0
+	}
+	return priority
+}
+
+func configuredAuthPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
 		return 0
 	}
@@ -1161,6 +1169,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
+	available = dropDemotedAuths(available)
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
@@ -1324,6 +1333,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
+	available = dropDemotedAuths(available)
 
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
