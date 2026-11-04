@@ -17,6 +17,11 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
   - `routing.strategy: soonest-reset` picks the available credential whose weekly window resets soonest (Claude `7d` reset, Codex secondary reset), so quota that would expire unused is spent first.
   - Credentials with no known future reset (new, after a restart, or after their window rolled over) are picked first so their reset gets learned. Ties keep ID order.
   - Treated as a custom selector, so the scheduler fast path is skipped and every pick goes through `Pick`. Works with session affinity as its fallback.
+- Promote before reset (`sdk/cliproxy/auth/promote_before_reset.go`, hooked into `authPriority` in `selector.go`):
+  - `promote_burn_hours` (auth JSON field, on a credential with negative `priority`): the credential is treated as priority 0 while `hours until weekly reset <= remaining weekly fraction * promote_burn_hours`, or while its weekly reset or usage is unknown (so one request learns them). The value is roughly how many hours of heavy use burn a full week of that plan.
+  - Meant for `soonest-reset`: a work plan stays a fallback, then joins the top tier near its reset and wins because it resets first.
+  - With session affinity, a session bound to such a credential moves to the top tier once the credential is no longer in it (promotion ended, or a higher tier recovered).
+  - Priority is read live on the custom-selector path only; the built-in scheduler fast path (round-robin, fill-first) caches priority and does not see promotion changes until the credential is updated.
 - Keep fork changes small and isolated so rebasing onto new upstream releases stays easy.
 
 ## Syncing With Upstream
